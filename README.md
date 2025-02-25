@@ -2,6 +2,8 @@
 
 Tested: Working Video 720p, 1080p & Sound
 
+Dev notes: Clocks swapped in sys.tcl
+
 ___
 # Amstrad PCW MiSTer Core
 <img src="./docs/images/gnome.jpg" alt="Gnome Ranger" width="400" height="300">
