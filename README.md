@@ -1,3 +1,8 @@
+-=(PCW_Senhor notes)=-
+
+Tested: Working Video 720p, 1080p & Sound
+
+___
 # Amstrad PCW MiSTer Core
 <img src="./docs/images/gnome.jpg" alt="Gnome Ranger" width="400" height="300">
 
