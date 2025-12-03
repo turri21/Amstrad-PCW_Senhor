@@ -88,6 +88,9 @@ localparam CF2DD = 1'b1;
 localparam UPD765_SD_BUFF_TRACKINFO = 1'd0;
 localparam UPD765_SD_BUFF_SECTOR = 1'd1;
 
+localparam [1:0] SCAN_MODE_EQUAL      = 2'd0;
+localparam [1:0] SCAN_MODE_LOW_EQUAL  = 2'd1;
+localparam [1:0] SCAN_MODE_HIGH_EQUAL = 2'd2;
 typedef enum bit [5:0]
 {
  COMMAND_IDLE,     					// 00 - x00            
@@ -158,8 +161,9 @@ typedef enum bit [5:0]
  COMMAND_RELOAD_TRACKINFO, 			// 49 - x31
  COMMAND_RELOAD_TRACKINFO1, 		// 50 - x32
  COMMAND_RELOAD_TRACKINFO2, 		// 51 - x33
- COMMAND_RELOAD_TRACKINFO3 			// 52 - x34
+ COMMAND_RELOAD_TRACKINFO3, 		// 52 - x34
 
+COMMAND_SCAN_NEXT_SECTOR			// 53 - x35
 } state_t;
 
 typedef enum bit [1:0] {
@@ -284,6 +288,12 @@ always @(posedge clk_sys) begin
 	reg [7:0] i_head_timer;
 	reg i_rtrack, i_write, i_rw_deleted;
 	reg [7:0] status[4] = '{0, 0, 0, 0}; //st0-3
+	reg [23:0] scan_timer;
+	reg        scan_failed;
+	reg        scan_equal;
+	reg        condition_met;
+	reg  [7:0] scan_status2;
+	reg  [1:0] scan_mode;
 	state_t state;
 	state_t i_command;
    reg i_current_drive, i_scan_lock = 0;
@@ -422,6 +432,11 @@ always @(posedge clk_sys) begin
 		sd_wr <= 0;
 		sd_busy <= 0;
 		image_track_offsets_wr <= 0;
+		scan_failed <= 0;
+		condition_met <= 0;
+		scan_status2 <= 0;
+		scan_mode <= SCAN_MODE_EQUAL;
+		i_scanning <= 0;
 		//restart "mounting" of image(s)
 		if (image_scan_state[0]) image_scan_state[0] <= 1;
 		if (image_scan_state[1]) image_scan_state[1] <= 1;
@@ -532,7 +547,7 @@ always @(posedge clk_sys) begin
 							8'b0X0_01010: begin state <= COMMAND_READ_ID; last_state <= COMMAND_READ_ID;  end
 							8'b0X0_01101: begin state <= COMMAND_FORMAT_TRACK; last_state <= COMMAND_FORMAT_TRACK;  end
 							8'bXXX_10001: begin state <= COMMAND_SCAN_EQUAL; last_state <= COMMAND_SCAN_EQUAL; end
-							8'bXXX_11001: begin state <= COMMAND_SCAN_LOW_OR_EQUAL; last_state <= COMMAND_SCAN_LOW_OR_EQUAL;  end
+							8'bXXX_11001: begin state <= COMMAND_SCAN_LOW_OR_EQUAL; last_state <= COMMAND_SCAN_LOW_OR_EQUAL; end
 							8'bXXX_11101: begin state <= COMMAND_SCAN_HIGH_OR_EQUAL; last_state <= COMMAND_SCAN_HIGH_OR_EQUAL; end 
 							8'b000_00111: begin state <= COMMAND_RECALIBRATE; last_state <= COMMAND_RECALIBRATE; end
 							8'b000_01000: begin state <= COMMAND_SENSE_INTERRUPT_STATUS; last_state <= COMMAND_SENSE_INTERRUPT_STATUS; end
@@ -750,6 +765,7 @@ end
 				COMMAND_READ_TRACK:
 				begin
 					int_state <= '{ 0, 0 };
+					i_scanning <= 0;
 					i_command <= COMMAND_RW_DATA_EXEC;
 					state <= COMMAND_SETUP;
 					{i_rtrack, i_write, i_rw_deleted} <= 3'b100;
@@ -758,6 +774,7 @@ end
 				COMMAND_WRITE_DATA:
 				begin
 					int_state <= '{ 0, 0 };
+					i_scanning <= 0;
 					i_command <= COMMAND_RW_DATA_EXEC;
 					state <= COMMAND_SETUP;
 					{i_rtrack, i_write, i_rw_deleted} <= 3'b010;
@@ -766,6 +783,7 @@ end
 				COMMAND_WRITE_DELETED_DATA:
 				begin
 					int_state <= '{ 0, 0 };
+					i_scanning <= 0;
 					i_command <= COMMAND_RW_DATA_EXEC;
 					state <= COMMAND_SETUP;
 					{i_rtrack, i_write, i_rw_deleted} <= 3'b011;
@@ -774,6 +792,7 @@ end
 				COMMAND_READ_DATA:
 				begin
 					int_state <= '{ 0, 0 };
+					i_scanning <= 0;
 					i_command <= COMMAND_RW_DATA_EXEC;
 					state <= COMMAND_SETUP;
 					{i_rtrack, i_write, i_rw_deleted} <= 3'b000;
@@ -782,6 +801,7 @@ end
 				COMMAND_READ_DELETED_DATA:
 				begin
 					int_state <= '{ 0, 0 };
+					i_scanning <= 0;
 					i_command <= COMMAND_RW_DATA_EXEC;
 					state <= COMMAND_SETUP;
 					{i_rtrack, i_write, i_rw_deleted} <= 3'b001;
@@ -804,7 +824,7 @@ end
 				// Setup track offsets in image based on disk
 				COMMAND_RW_DATA_EXEC1:
 				begin
-					m_status[UPD765_MAIN_DIO] <= ~i_write;
+					m_status[UPD765_MAIN_DIO] <= ~(i_write | i_scanning);
 					if (i_rtrack) i_r <= 1;
 					i_bc <= 1;
 					// Read from the track stored at the last seek
@@ -819,6 +839,7 @@ end
 				COMMAND_RW_DATA_EXEC2:				
 				if (~sd_busy & ~buff_wait) begin
 					i_current_sector <= 1'd1;
+					scan_timer <= 24'd12800000; // ~200ms delay for sector not found simulation
 					//i_scanning <= 0;
 					sd_buff_type <= UPD765_SD_BUFF_TRACKINFO;
 					i_seek_pos <= {image_track_offsets_in+1'd1,8'd0}; //TrackInfo+256bytes
@@ -836,15 +857,28 @@ end
 						buff_wait <= 1;
 				// i_current_sector is the Sector id on the track and they can be out of order in the image (e.g. 1,6,3,9,etc)
 				end else if (i_current_sector > i_total_sectors) begin
+					if (scan_timer > 0 && i_scanning) begin
+						scan_timer <= scan_timer - 1;
+					end else begin
 						m_status[UPD765_MAIN_EXM] <= 0;
 						//sector not found or end of track
 						status[0] <= i_rtrack ? 8'h00 : 8'h40;
 						status[1] <= i_rtrack ? 8'h00 : 8'h04;
-						status[2] <= i_rtrack | ~i_bc ? 8'h00 : (i_sector_c == 8'hff ? 8'h02 : 8'h10); //bad/wrong cylinder
+						status[2] <= i_scanning | i_rtrack | ~i_bc ? 8'h00 : (i_sector_c == 8'hff ? 8'h02 : 8'h10); //bad/wrong cylinder
+						//status[2] <= 8'h00; // Force ST2 to 00 as per MAME log for Scan Equal Not Found
+						
+						// Update return values to match the target sector we failed to find
+						if (!i_rtrack) begin
+							i_sector_c <= i_c;
+							i_sector_h <= i_h;
+							i_sector_r <= i_r;
+							i_sector_n <= i_n;
+						end
 						state <= COMMAND_READ_RESULTS;
 						int_state[ds0] <= 1'b1;
 						phase <= PHASE_RESPONSE;
-					end else begin
+					end
+				end else begin
 						//process sector info list
 						case (buff_addr[2:0])
 							0: i_sector_c <= buff_data_in;
@@ -941,10 +975,13 @@ end
 							sd_wr[ds0] <= 1;
 							sd_busy <= 1;
 						end
+						if (i_scanning) i_timeout <= 2048;
 						state <= COMMAND_RW_DATA_EXEC8;
 					end else if (~m_status[UPD765_MAIN_RQM]) begin
-						m_status[UPD765_MAIN_RQM] <= 1;	
-						if(ndma_mode) int_state[ds0] <= 1'b1;
+						if (~wr) begin
+							m_status[UPD765_MAIN_RQM] <= 1;
+							if(ndma_mode) int_state[ds0] <= 1'b1;
+						end
 					end else if (~i_write & ~old_rd & rd & a0) begin
 						if (&buff_addr) begin
 							//sector continues on the next LBA
@@ -964,13 +1001,46 @@ end
 						i_bytes_to_read <= i_bytes_to_read - 1'd1;
 						i_timeout <= OVERRUN_TIMEOUT;
 						if(ndma_mode) int_state[ds0] <= 1'b0;
-					end else if (i_write & ~old_wr & wr & a0) begin
-						buff_wr <= 1;
-						buff_data_out <= din;
-						i_timeout <= OVERRUN_TIMEOUT;
-						m_status[UPD765_MAIN_RQM] <= 0;
-						state <= COMMAND_RW_DATA_EXEC7;
-						if(ndma_mode) int_state[ds0] <= 1'b0;
+					end else if ((i_write | i_scanning) & old_wr & ~wr & a0) begin
+						if (i_scanning) begin
+							if (&buff_addr) begin
+								state <= COMMAND_RW_DATA_EXEC5;
+							end
+							// MAME logic: 0xFF is wildcard, i_dtl=2 means skip alternate bytes (odd offsets)
+							if (din != 8'hFF && !(i_dtl == 2 && buff_addr[0])) begin
+								case (scan_mode)
+									SCAN_MODE_EQUAL: if (din != buff_data_in) begin scan_failed <= 1'b1; scan_equal <= 0; end
+									SCAN_MODE_LOW_EQUAL: begin
+										if (buff_data_in > din) scan_failed <= 1'b1;
+										else if (buff_data_in < din) scan_failed <= 1'b0;
+										if (din != buff_data_in) scan_equal <= 0;
+									end
+									SCAN_MODE_HIGH_EQUAL: begin
+										if (buff_data_in < din) scan_failed <= 1'b1;
+										else if (buff_data_in > din) scan_failed <= 1'b0;
+										if (din != buff_data_in) scan_equal <= 0;
+									end
+									default: ;
+								endcase
+							end
+							i_timeout <= OVERRUN_TIMEOUT;
+							m_status[UPD765_MAIN_RQM] <= 0;
+							if (i_sector_size) begin
+								i_sector_size <= i_sector_size - 1'd1;
+								buff_addr <= buff_addr + 1'd1;
+								buff_wait <= 1;
+								i_seek_pos <= i_seek_pos + 1'd1;
+							end
+							i_bytes_to_read <= i_bytes_to_read - 1'd1;
+							if(ndma_mode) int_state[ds0] <= 1'b0;
+						end else begin
+							buff_wr <= 1;
+							buff_data_out <= din;
+							i_timeout <= OVERRUN_TIMEOUT;
+							m_status[UPD765_MAIN_RQM] <= 0;
+							state <= COMMAND_RW_DATA_EXEC7;
+							if(ndma_mode) int_state[ds0] <= 1'b0;
+						end
 					end else begin
 						i_timeout <= i_timeout - 1'd1;
 					end
@@ -1003,7 +1073,35 @@ end
 				//End of reading/writing sector, what's next?
 				COMMAND_RW_DATA_EXEC8:
 				if (~sd_busy) begin
-					if (~i_rtrack & ~(i_sk & (i_rw_deleted ^ i_sector_st2[6])) &
+					if (i_scanning) begin
+						if (i_timeout > 0) begin
+							i_timeout <= i_timeout - 1'd1;
+						end else if (~scan_failed) begin
+							m_status[UPD765_MAIN_EXM] <= 0;
+							condition_met <= 1'b1;
+							scan_status2 <= (i_sector_st2 & 8'hF3) | (scan_equal ? 8'h08 : 8'h00);
+							status[0] <= 0;
+							status[1] <= 0;
+							status[2] <= (i_sector_st2 & 8'hF3) | (scan_equal ? 8'h08 : 8'h00);
+							i_scanning <= 0;
+							state <= COMMAND_READ_RESULTS;
+							int_state[ds0] <= 1'b1;
+							phase <= PHASE_RESPONSE;
+						end else if ((~i_mt | hds | ~image_sides[ds0]) && (i_r == i_eot)) begin
+							m_status[UPD765_MAIN_EXM] <= 0;
+							condition_met <= 1'b0;
+							scan_status2 <= (i_sector_st2 & 8'hF3) | 8'h04;
+							status[0] <= 0;
+							status[1] <= 0;
+							status[2] <= (i_sector_st2 & 8'hF3) | 8'h04;
+							i_scanning <= 0;
+							state <= COMMAND_READ_RESULTS;
+							int_state[ds0] <= 1'b1;
+							phase <= PHASE_RESPONSE;
+						end else begin
+							state <= COMMAND_SCAN_NEXT_SECTOR;
+						end
+					end else if (~i_rtrack & ~(i_sk & (i_rw_deleted ^ i_sector_st2[6])) &
 						((i_sector_st1[5] & i_sector_st2[5]) | (i_rw_deleted ^ i_sector_st2[6]))) begin
 						//deleted mark or crc error
 						m_status[UPD765_MAIN_EXM] <= 0;
@@ -1036,6 +1134,22 @@ end
 					end
 				end
 
+				COMMAND_SCAN_NEXT_SECTOR:
+				begin
+					// keep SCAN command running while we fetch the next sector
+					m_status[UPD765_MAIN_RQM] <= 0;
+					scan_failed <= 0;
+					scan_equal <= 1;
+					condition_met <= 0;
+					if (i_mt & image_sides[ds0]) begin
+						hds <= ~hds;
+						i_h <= ~i_h;
+						image_track_offsets_addr <= { pcn[ds0], ~hds };
+						buff_wait <= 1;
+					end
+					if (~i_mt | hds | ~image_sides[ds0]) i_r <= i_r + 1'd1;
+					state <= COMMAND_RW_DATA_EXEC2;
+				end
 				COMMAND_FORMAT_TRACK:
 				begin
 					int_state <= '{ 0, 0 };
@@ -1110,25 +1224,43 @@ end
 				COMMAND_SCAN_EQUAL:
 				begin
 					int_state <= '{ 0, 0 };
-					if (~old_wr & wr & a0) begin
-						state <= COMMAND_IDLE;
-					end
+					scan_failed <= 0;
+					scan_equal <= 1;
+					condition_met <= 0;
+					scan_status2 <= 0;
+					scan_mode <= SCAN_MODE_EQUAL;
+					i_scanning <= 1;
+					i_command <= COMMAND_RW_DATA_EXEC;
+					state <= COMMAND_SETUP;
+					{i_rtrack, i_write, i_rw_deleted} <= 3'b000;
 				end
 
 				COMMAND_SCAN_HIGH_OR_EQUAL:
 				begin
 					int_state <= '{ 0, 0 };
-					if (~old_wr & wr & a0) begin
-						state <= COMMAND_IDLE;
-					end
+					scan_failed <= 0;
+					scan_equal <= 1;
+					condition_met <= 0;
+					scan_status2 <= 0;
+					scan_mode <= SCAN_MODE_HIGH_EQUAL;
+					i_scanning <= 1;
+					i_command <= COMMAND_RW_DATA_EXEC;
+					state <= COMMAND_SETUP;
+					{i_rtrack, i_write, i_rw_deleted} <= 3'b000;
 				end
 
 				COMMAND_SCAN_LOW_OR_EQUAL:
 				begin
 					int_state <= '{ 0, 0 };
-					if (~old_wr & wr & a0) begin
-						state <= COMMAND_IDLE;
-					end
+					scan_failed <= 0;
+					scan_equal <= 1;
+					condition_met <= 0;
+					scan_status2 <= 0;
+					scan_mode <= SCAN_MODE_LOW_EQUAL;
+					i_scanning <= 1;
+					i_command <= COMMAND_RW_DATA_EXEC;
+					state <= COMMAND_SETUP;
+					{i_rtrack, i_write, i_rw_deleted} <= 3'b000;
 				end
 
 				COMMAND_SETUP:
@@ -1170,12 +1302,14 @@ end
 									status[0] <= 8'h40;
 									status[1] <= 8'b101;
 									status[2] <= 0;
+									i_scanning <= 0;
 									state <= COMMAND_READ_RESULTS;
 								end else if (hds & ~image_sides[ds0]) begin
 									hds <= 0;
 									status[0] <= 8'h48; //no side B
 									status[1] <= 0;
 									status[2] <= 0;
+									i_scanning <= 0;
 									state <= COMMAND_READ_RESULTS;
 								end else begin
 									phase <= PHASE_EXECUTE;
@@ -1228,7 +1362,7 @@ end
 									end
 								6: begin
 										m_data <= i_sector_n;
-										state <= COMMAND_IDLE;
+										state <= COMMAND_IDLE;									 
 									end
 								7: ;//not happen
 							endcase
