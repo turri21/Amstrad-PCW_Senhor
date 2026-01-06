@@ -66,9 +66,8 @@ The mode allows loading 4-bit colour palettes, in the same format as the Gameboy
 PCWPlus mode need to be activate before a compatible game load.
 
 ## Current issue
-* SymbOS does not work correctly
-* PSI-5 Trading Company - Requires SCAN_EQUAL disk command which is not implemented
-* APPLE JACK not working
+* PSI-5 Trading Company - The Scan equal function is not fully integrated, reload if the game fails in boot.
+* The New Zealand story has problems in PCW+ mode 
 
 # Changes from previous release
 * Support for PCW9512+ Mode and 3.5" drives
@@ -81,6 +80,8 @@ PCWPlus mode need to be activate before a compatible game load.
 * Fixed issues with disk corruption and boot errors
 * Fixed corruption issue with RAMtest
 * F2/F4/F6/F8 no longer require you to press shift
+* The keyboard in this version  writes data directly into memory, but it needs to be scanned with a period greater than 1 ms, because if we scan every cycle, some key reading functions fail (Applejack and Simbos).
+* Scan equal is partialy implemented , this is enough for Psi-5 Trading Company , who is the only game in the system than requires  ( check a bad sector as a software protection)
 
 All the new features are demonstrated in the following video:
 [![Watch the video](https://img.youtube.com/vi/z-IoDr81xjE/hqdefault.jpg)](https://youtu.be/z-IoDr81xjE)

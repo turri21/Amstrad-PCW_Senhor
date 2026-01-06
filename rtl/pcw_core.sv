@@ -1010,16 +1010,27 @@ wire iow_falling_edge = (iow_prev == 1'b0) && (iow == 1'b1);
     // Keyboard scanner logic
     logic [3:0] kbd_scan_cnt;
     logic kbd_write_en;
-    logic [19:0] kbd_timer;
+    logic [15:0] kbd_timer;
     logic kbd_update_request;
+
+    // Keyboard matrix is mirrored into RAM at 0x3FF0-0x3FFF.
+    // Trigger a refresh every ~2ms based on clk_sys (32MHz => 64,000 cycles).
+    localparam int unsigned KBD_UPDATE_PERIOD_CYCLES = 32_000_000 / 500;
 
     always @(posedge clk_sys) begin
         if (reset) begin
             kbd_timer <= 0;
             kbd_update_request <= 0;
         end else begin
-            kbd_timer <= kbd_timer + 1'b1;
-            if (kbd_timer == 0) kbd_update_request <= 1'b1; // Trigger update
+            // Only count when there's no pending update.
+            if (!kbd_update_request) begin
+                if (kbd_timer == (KBD_UPDATE_PERIOD_CYCLES-1)) begin
+                    kbd_timer <= 0;
+                    kbd_update_request <= 1'b1; // Trigger update
+                end else begin
+                    kbd_timer <= kbd_timer + 1'b1;
+                end
+            end
             
             if (kbd_scan_cnt == 4'hF && kbd_write_en) begin
                 kbd_update_request <= 1'b0; // Clear request after full scan
