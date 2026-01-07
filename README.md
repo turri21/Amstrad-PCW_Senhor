@@ -1,3 +1,10 @@
+-=(PCW_Senhor notes)=-
+
+Tested: Working Video 720p, 1080p & Sound.
+
+Dev notes: Use Quartus 23.1 to synthesize and balanced optimization mode in .qsf.
+
+___
 # Amstrad PCW MiSTer Core
 <img src="./docs/images/gnome.jpg" alt="Gnome Ranger" width="400" height="300">
 
