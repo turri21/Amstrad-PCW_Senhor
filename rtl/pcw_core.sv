@@ -243,8 +243,8 @@ module pcw_core(
     assign iow = cpuwr | cpuiorq | ~cpum1;
     assign memr = cpurd | cpumreq;
     assign memw = cpuwr | cpumreq;
-    logic kbd_sel/* synthesis keep */;
-    assign kbd_sel = ram_b_addr[20:4]==17'b00000111111111111 && memr==1'b0 ? 1'b1 : 1'b0;
+    //logic kbd_sel/* synthesis keep */;
+    //assign kbd_sel = ram_b_addr[20:4]==17'b00000111111111111 && memr==1'b0 ? 1'b1 : 1'b0;
     logic daisy_sel;
     assign daisy_sel = ((cpua[7:0]==8'hfc || cpua[7:0]==8'hfd) & model) && (~ior | ~iow)? 1'b1 : 1'b0;
 
@@ -374,7 +374,8 @@ wire iow_falling_edge = (iow_prev == 1'b0) && (iow == 1'b1);
             end
         end
         else begin
-            cpudi = kbd_sel ? kbd_data : memr ? 8'hff : ram_b_dout;
+            //cpudi = kbd_sel ? kbd_data : memr ? 8'hff : ram_b_dout;
+            cpudi = memr ? 8'hff : ram_b_dout;
         end
     end
     assign portF8 = {1'b0,vblank,fdc_int_latch,~ntsc,timer_misses};
@@ -751,9 +752,12 @@ wire iow_falling_edge = (iow_prev == 1'b0) && (iow == 1'b1);
 
         // Port B - used for CPU and download access
         .b_clk(clk_sys),
-        .b_wr(dn_active ? dn_wr : ~memw & ~|ram_b_addr[20:18]),
-        .b_addr(dn_active ? dn_addr[17:0] : ram_b_addr[17:0]),
-        .b_din(dn_active ? dn_data : cpudo),
+        //.b_wr(dn_active ? dn_wr : ~memw & ~|ram_b_addr[20:18]),
+        //.b_addr(dn_active ? dn_addr[17:0] : ram_b_addr[17:0]),
+        //.b_din(dn_active ? dn_data : cpudo),
+        .b_wr(dn_active ? dn_wr : (kbd_write_en ? 1'b1 : ~memw & ~|ram_b_addr[20:18])),
+        .b_addr(dn_active ? dn_addr[17:0] : (kbd_write_en ? {14'h0FFF, kbd_scan_cnt} : ram_b_addr[17:0])),
+        .b_din(dn_active ? dn_data : (kbd_write_en ? kbd_data : cpudo)),
         .b_dout(dpram_b_dout)
     );
 
@@ -1002,6 +1006,45 @@ wire iow_falling_edge = (iow_prev == 1'b0) && (iow == 1'b1);
     logic line_up, line_down;   // line up and down signals for moving fake colour
     logic toggle_full;          // Toggle full screen colour on / off
     logic [7:0] kbd_data;
+
+    // Keyboard scanner logic
+    logic [3:0] kbd_scan_cnt;
+    logic kbd_write_en;
+    logic [15:0] kbd_timer;
+    logic kbd_update_request;
+
+    // Keyboard matrix is mirrored into RAM at 0x3FF0-0x3FFF.
+    // Trigger a refresh every ~2ms based on clk_sys (32MHz => 64,000 cycles).
+    localparam int unsigned KBD_UPDATE_PERIOD_CYCLES = 32_000_000 / 500;
+
+    always @(posedge clk_sys) begin
+        if (reset) begin
+            kbd_timer <= 0;
+            kbd_update_request <= 0;
+        end else begin
+            // Only count when there's no pending update.
+            if (!kbd_update_request) begin
+                if (kbd_timer == (KBD_UPDATE_PERIOD_CYCLES-1)) begin
+                    kbd_timer <= 0;
+                    kbd_update_request <= 1'b1; // Trigger update
+                end else begin
+                    kbd_timer <= kbd_timer + 1'b1;
+                end
+            end
+            
+            if (kbd_scan_cnt == 4'hF && kbd_write_en) begin
+                kbd_update_request <= 1'b0; // Clear request after full scan
+            end
+        end
+    end
+
+    // Write only when requested AND bus is idle
+    assign kbd_write_en = kbd_update_request && cpurd && cpuwr && !dn_active;
+
+    always @(posedge clk_sys) begin
+        if (reset) kbd_scan_cnt <= 0;
+        else if (kbd_write_en) kbd_scan_cnt <= kbd_scan_cnt + 1'b1;
+    end
     key_joystick keyjoy(
         .reset(reset),
         .clk_sys(clk_sys),
@@ -1011,7 +1054,8 @@ wire iow_falling_edge = (iow_prev == 1'b0) && (iow == 1'b1);
         .lk1(1'b0),
         .lk2(1'b0),
         .lk3(1'b0),
-        .addr(cpua[3:0]),
+        //.addr(cpua[3:0]),
+        .addr(kbd_scan_cnt),
         .key_data(kbd_data),
         .keymouse(mouse_type==MOUSE_KEYMOUSE),
         .mouse_pulse(ps2_mouse[24]),
